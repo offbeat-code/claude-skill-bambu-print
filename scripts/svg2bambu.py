@@ -6,14 +6,23 @@ do wysokości --base, nad nią każdy kolor do --base + --top. Zmiany filamentu 
 import argparse, json, os, re, subprocess, sys, zipfile
 import numpy as np
 from svgelements import SVG, Shape, Path, Color, Text
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
+from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import nearest_points, unary_union
 from shapely import make_valid, affinity
 import manifold3d as m3
 
 BS = next(iter(sorted(__import__('glob').glob('/Applications/Bambu*Studio*.app/Contents/MacOS/BambuStudio'))), None)
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BED_CENTER = 128.0  # P2S: stół 256x256
+LAYER = 0.2
+
+# Presety z wydruków użytkownika (historia Bambu, 2026-10, 3 toppery) —
+# przodem do płyty (lustro), grubość ~2 mm (z wagi), nóżka 4-4.5 mm x 73-99 mm ze zwężonym czubkiem.
+DEFAULTS = dict(width=80.0, base=1.2, top=0.4, face='up', outline=0.0, leg=0.0, hole=0.0, thicken=0.0)
+PRESETS = {
+    'toper': dict(width=120.0, base=1.6, top=0.4, face='down', leg=90.0, thicken=0.3),
+    'brelok': dict(width=40.0, base=2.4, top=0.6, face='up', outline=1.5, hole=4.0),
+}
 
 
 def svg_regions(path):
@@ -124,6 +133,73 @@ def to_mm(regions, width):
     return {k: affinity.scale(affinity.translate(g, -minx, -miny), s, s, origin=(0, 0)) for k, g in regions.items()}
 
 
+def thicken(mm, t):
+    """Pogrubia każdą kreskę o t mm; nakładki oddaje mniejszym kolorom (detale na wierzchu)."""
+    out, claimed = {}, Polygon()
+    for k in sorted(mm, key=lambda k: mm[k].area):
+        g = mm[k].buffer(t / 2, join_style=1).difference(claimed)
+        out[k], claimed = g, claimed.union(g)
+    return out
+
+
+def add_leg(union, length, width=4.5, tip=4.0, overlap=5.0):
+    """Nóżka topera pod sylwetką (współrzędne SVG: y w dół). Szuka pionu przy środku, który trafia w kształt."""
+    minx, miny, maxx, maxy = union.bounds
+    cx0 = (minx + maxx) / 2
+    for off in [0] + [s * d for d in np.arange(1, (maxx - minx) * 0.3, 1.0) for s in (1, -1)]:
+        cx = cx0 + off
+        hit = union.intersection(Polygon([(cx - width / 2, miny - 1), (cx + width / 2, miny - 1), (cx + width / 2, maxy + 1), (cx - width / 2, maxy + 1)]))
+        if hit.area > width * overlap * 0.8:
+            break
+    y0 = hit.bounds[3]  # najniższy punkt kształtu w tym pionie
+    y1 = y0 + length
+    w = width / 2
+    return Polygon([(cx - w, y0 - overlap), (cx + w, y0 - overlap), (cx + w, y1 - tip), (cx + 0.5, y1), (cx - 0.5, y1), (cx - w, y1 - tip)])
+
+
+def bridges(union, width):
+    """Mostki: każdy kawałek odłączony od największego łączy najkrótszym odcinkiem szer. width. Zwraca geometrię mostków."""
+    main, rest, added = None, sorted(pieces(union), key=lambda p: -p.area), []
+    main, rest = rest[0], rest[1:]
+    while rest:
+        d, i, (p1, p2) = min((p.distance(main), i, nearest_points(p, main)) for i, p in enumerate(rest))
+        p = rest.pop(i)
+        if d > 1e-6:
+            # wejście 0.6 mm w oba kształty, żeby mostek na pewno się zrósł
+            v = np.array([p2.x - p1.x, p2.y - p1.y]) / d
+            b = LineString([(p1.x - v[0] * 0.6, p1.y - v[1] * 0.6), (p2.x + v[0] * 0.6, p2.y + v[1] * 0.6)]).buffer(width / 2, cap_style=1)
+            added.append(b)
+            main = main.union(b)
+        main = main.union(p)
+    return unary_union(added) if added else Polygon()
+
+
+def add_hole(union, d):
+    """Ucho breloka na górze sylwetki: (ucho, otwór)."""
+    minx, miny, maxx, _ = union.bounds
+    cx = (minx + maxx) / 2
+    col = union.intersection(Polygon([(cx - 1, miny - 1), (cx + 1, miny - 1), (cx + 1, miny + 50), (cx - 1, miny + 50)]))
+    top = col.bounds[1] if not col.is_empty else miny
+    r = d / 2 + 2.2
+    c = Point(cx, top - d / 2 + 0.6)
+    return c.buffer(r, 64), c.buffer(d / 2, 64)
+
+
+def dome(g, height, h_svg, z0):
+    """Wypukłość 3D: warstwy co 0.2 mm z rosnącym wcięciem (profil ćwiartki koła, promień = wysokość)."""
+    n = max(1, round(height / LAYER))
+    r, man = height, None
+    for i in range(n):
+        zt = (i + 1) * LAYER
+        inset = r - np.sqrt(max(r * r - (zt - (height - r)) ** 2, 0)) if zt > height - r else 0
+        gi = g.buffer(-inset, join_style=1) if inset else g
+        if gi.is_empty:
+            break
+        layer = to_cross_section(gi, 1, h_svg).extrude(LAYER).translate((0, 0, z0 + i * LAYER))
+        man = layer if man is None else man + layer
+    return man
+
+
 def analyze(svg_text, regions, a):
     """Lista (problem, naprawa) + rekomendowane flagi. Nic nie zmienia."""
     issues, rec = [], {}
@@ -131,11 +207,18 @@ def analyze(svg_text, regions, a):
         if tag in svg_text:
             issues.append((f'SVG zawiera {what} — tego nie zamienię wprost na bryły',
                            'wyrenderować SVG do PNG i przejść ścieżką rastrową (raster2svg.py)'))
-    mm = to_mm(regions, a.width)
+    mm = to_mm(regions, a.width - a.thicken)
+    if a.thicken:
+        mm = thicken(mm, a.thicken)
     u = unary_union(list(mm.values()))
     _, _, w, h = u.bounds
+    h += a.leg
     n = len(pieces(u))
-    if n > 1 and not a.outline:
+    if n > 1 and a.leg and not a.outline and not a.bridge:
+        issues.append((f'{n} osobnych kawałków (słowa, kropki, akcenty) — odpadną od topera',
+                       'mostki 1.2 mm do najbliższej litery (litery zostają cienkie, bez obwódki)'))
+        rec['bridge'] = 1.2
+    elif n > 1 and not a.outline and not a.bridge:
         need = next((o for o in (1, 1.5, 2, 3, 4, 5, 6, 8) if len(pieces(u.buffer(o, join_style=1))) == 1), None)
         if need:
             issues.append((f'{n} osobnych kawałków (np. niepołączone litery) — wydrukują się luzem',
@@ -163,11 +246,20 @@ def analyze(svg_text, regions, a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('svg')
-    ap.add_argument('--width', type=float, default=80.0, help='szerokość w mm')
-    ap.add_argument('--base', type=float, default=1.2, help='grubość bazy w mm')
-    ap.add_argument('--top', type=float, default=0.4, help='grubość warstwy kolorów w mm (0.4 = 2 warstwy)')
+    ap.add_argument('--typ', choices=sorted(PRESETS), help='preset: toper (lustro, nóżka, 120 mm), brelok (40 mm, ucho, obwódka)')
+    ap.add_argument('--width', type=float, help='szerokość w mm (bez nóżki)')
+    ap.add_argument('--base', type=float, help='grubość bazy w mm')
+    ap.add_argument('--top', type=float, help='grubość warstwy kolorów w mm (0.4 = 2 warstwy)')
+    ap.add_argument('--face', choices=['up', 'down'], help='down = przód na płycie (lustro, faktura płyty, ostre krawędzie kolorów)')
+    ap.add_argument('--relief', type=float, default=0, help='efekt 3D: kolory inne niż baza wystają o tyle mm (tylko --face up)')
+    ap.add_argument('--dome', action='store_true', help='zaokrąglone (wypukłe) krawędzie wystających kolorów')
+    ap.add_argument('--iron', action='store_true', help='prasowanie wierzchniej warstwy (gładszy, błyszczący wierzch)')
+    ap.add_argument('--leg', type=float, help='nóżka topera, długość w mm (0 = brak)')
+    ap.add_argument('--hole', type=float, help='otwór na kółko breloka, średnica w mm (0 = brak)')
     ap.add_argument('--max-colors', type=int, default=4, help='sloty AMS; nadmiarowe kolory scalane w najbliższe')
-    ap.add_argument('--outline', type=float, default=0, help='obwódka w mm dookoła całości (łączy osobne kawałki)')
+    ap.add_argument('--outline', type=float, help='obwódka w mm dookoła całości (łączy osobne kawałki)')
+    ap.add_argument('--thicken', type=float, help='pogrubienie każdej kreski o tyle mm (cienkie skrypty — wytrzymałość)')
+    ap.add_argument('--bridge', type=float, default=0, help='mostki tej szerokości (mm) do odłączonych kawałków — kropki, akcenty, słowa; litery zostają cienkie')
     ap.add_argument('--outline-color', default='base', help='kolor obwódki: HEX (#FFFFFF) albo "base" = kolor bazy')
     ap.add_argument('--min-island', type=float, default=0.5, help='usuń drobinki mniejsze niż tyle mm2')
     ap.add_argument('--check', action='store_true', help='tylko analiza problemów, bez modelu i slicingu')
@@ -175,6 +267,13 @@ def main():
     ap.add_argument('--out', help='katalog wyjściowy (domyślnie ~/Documents/BambuPrint/<nazwa>)')
     ap.add_argument('--open', action='store_true', help='otwórz wynik w Bambu Studio')
     a = ap.parse_args()
+    for k, v in {**DEFAULTS, **PRESETS.get(a.typ, {})}.items():
+        if getattr(a, k) is None:
+            setattr(a, k, v)
+    if a.relief and a.face == 'down':
+        sys.exit('--relief działa tylko z --face up (przód na płycie jest płaski)')
+    print(f'ustawienia: typ={a.typ or "-"} szer={a.width:g} baza={a.base:g} kolory={a.top:g} przód={a.face}'
+          f' relief={a.relief:g}{" kopuła" if a.dome else ""} nóżka={a.leg:g} otwór={a.hole:g} obwódka={a.outline:g} pogrubienie={a.thicken:g}{" prasowanie" if a.iron else ""}')
 
     svg_text = open(a.svg, errors='ignore').read()
     regions = merge_colors(svg_regions(a.svg), a.max_colors)
@@ -195,12 +294,19 @@ def main():
     name = os.path.splitext(os.path.basename(a.svg))[0]
     a.out = os.path.abspath(a.out or os.path.expanduser(f'~/Documents/BambuPrint/{name}'))
 
-    mm = to_mm(regions, a.width - 2 * a.outline)  # obwódka wlicza się w zadaną szerokość
+    mm = to_mm(regions, a.width - 2 * a.outline - a.thicken)  # obwódka i pogrubienie wliczają się w zadaną szerokość
     for k in mm:  # drobinki
         mm[k] = unary_union([p for p in pieces(mm[k]) if p.area >= a.min_island] or [Polygon()])
+    if a.thicken:
+        mm = thicken(mm, a.thicken)
     mm = {k: g for k, g in mm.items() if not g.is_empty}
     union = unary_union(list(mm.values()))
     base_col = max(mm, key=lambda k: mm[k].area)
+    if a.bridge and len(pieces(union)) > 1:
+        br = bridges(union, a.bridge)
+        print(f'mostki: {len(pieces(br))} x {a.bridge:g} mm')
+        mm[base_col] = mm[base_col].union(br.difference(union))
+        union = union.union(br)
     if a.outline:
         sil = union.buffer(a.outline, join_style=1)
         oc = base_col if a.outline_color == 'base' else a.outline_color.upper()
@@ -208,6 +314,19 @@ def main():
         if len(mm) > a.max_colors:
             sys.exit(f'kolor obwódki {oc} to {len(mm)}. kolor > {a.max_colors} slotów AMS — wybierz jeden z istniejących: {list(mm)}')
         union, base_col = sil, oc
+    if a.leg:
+        leg = add_leg(union, a.leg)
+        mm[base_col] = mm[base_col].union(leg.difference(union))
+        union = union.union(leg)
+    if a.hole:
+        tab, hole = add_hole(union, a.hole)
+        mm[base_col] = mm[base_col].union(tab.difference(union))
+        union = union.union(tab).difference(hole)
+        mm = {k: g.difference(hole) for k, g in mm.items()}
+    if a.face == 'down':  # przód leży na płycie -> lustro, żeby po odwróceniu czytało się normalnie
+        cx = (union.bounds[0] + union.bounds[2]) / 2
+        mm = {k: affinity.scale(g, -1, 1, origin=(cx, 0)) for k, g in mm.items()}
+        union = affinity.scale(union, -1, 1, origin=(cx, 0))
     minx, miny, maxx, maxy = union.bounds
     mm = {k: affinity.translate(g, -minx, -miny) for k, g in mm.items()}
     union = affinity.translate(union, -minx, -miny)
@@ -215,13 +334,20 @@ def main():
 
     parts = []
     for col, g in sorted(mm.items(), key=lambda kv: kv[0] != base_col):
-        top = to_cross_section(g, 1, h).extrude(a.top).translate((0, 0, a.base))
-        man = to_cross_section(union, 1, h).extrude(a.base) + top if col == base_col else top
+        z_col, z_base = (0, a.top) if a.face == 'down' else (a.base, 0)
+        if col != base_col and a.relief:
+            hr = a.top + a.relief
+            top = dome(g, hr, h, a.base) if a.dome else to_cross_section(g, 1, h).extrude(hr).translate((0, 0, a.base))
+        else:
+            top = to_cross_section(g, 1, h).extrude(a.top).translate((0, 0, z_col))
+        man = to_cross_section(union, 1, h).extrude(a.base).translate((0, 0, z_base)) + top if col == base_col else top
         parts.append((col, man))
         t = thin_share(g)
         print(f'{col}: {g.area:.0f} mm2' + (' (baza)' if col == base_col else '')
               + (f', UWAGA {100 * t:.0f}% cieńsze niż 0.4 mm' if t > 0.05 else ''))
     print(f'kawałków: {len(pieces(union))}')
+    if a.leg and len(pieces(union)) > 1:
+        print(f'UWAGA: toper z {len(pieces(union))} osobnych kawałków — nie trzymające się nóżki odpadną (połącz litery w projekcie albo --outline)')
     a.width = W
 
     os.makedirs(a.out, exist_ok=True)
@@ -235,8 +361,14 @@ def main():
         f = os.path.join(a.out, f'fil{i + 1}.json')
         json.dump(tpl, open(f, 'w'), indent=1)
         fils.append(f)
+    process = os.path.join(a.profiles, 'process.json')
+    if a.iron:
+        p = json.load(open(process))
+        p['ironing_type'] = 'top'
+        process = os.path.join(a.out, 'process.json')
+        json.dump(p, open(process, 'w'), indent=1)
     cmd = [BS, '--slice', '0', '--arrange', '0',
-           '--load-settings', f"{os.path.join(a.profiles, 'machine.json')};{os.path.join(a.profiles, 'process.json')}",
+           '--load-settings', f"{os.path.join(a.profiles, 'machine.json')};{process}",
            '--load-filaments', ';'.join(fils), '--outputdir', a.out, '--export-3mf', name + '.gcode.3mf', in3mf]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     out = os.path.join(a.out, name + '.gcode.3mf')

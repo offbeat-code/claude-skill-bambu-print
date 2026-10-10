@@ -1,6 +1,6 @@
 ---
 name: bambu-print
-description: Zamienia obrazek (PNG, JPG, WEBP albo SVG) w kolorowy wydruk 3D na Bambu Lab P2S z AMS — wektoryzacja, model 3D z częścią per kolor, slicing i otwarcie gotowego pliku w Bambu Studio. Używaj, gdy użytkownik wrzuca grafikę/logo/zdjęcie i chce to wydrukować, „wrzucić do Bambu", zrobić z tego brelok, toper, magnes, tabliczkę albo płaski kolorowy wydruk.
+description: Zamienia obrazek (PNG, JPG, WEBP albo SVG) w kolorowy wydruk 3D na Bambu Lab P2S z AMS — wektoryzacja, model 3D z częścią per kolor, slicing i otwarcie gotowego pliku w Bambu Studio. Używaj, gdy użytkownik wrzuca grafikę/logo/zdjęcie i chce to wydrukować, „wrzucić do Bambu", zrobić z tego brelok, toper, magnes, tabliczkę albo płaski kolorowy wydruk. Także toper na tort z samego napisu (np. „Chrzest Święty Ola", „Sto lat") — bez grafiki, fontem typu Alex Brush.
 ---
 
 # Obrazek → kolorowy wydruk na Bambu P2S
@@ -56,6 +56,33 @@ Skrypt wypisuje: kolory i mm², ostrzeżenia o detalach < 0.4 mm, gramy per fila
 
 Na detale < 0.4 mm (ostrzeżenie > 5%): zaproponuj większą szerokość.
 
+### Typy i wykończenie (jakość przede wszystkim — niejasne → dopytaj, jedno pytanie z rekomendacją)
+
+Ustal na starcie, co to jest: **toper**, **brelok** czy płaskie logo/tabliczka. Preset ustawia rozmiar i geometrię; każdą flagę można nadpisać. `--check` też bierz z `--typ` (liczy nóżkę w wymiarze).
+
+| `--typ` | szerokość | grubość | przód | dodatki |
+|---|---|---|---|---|
+| `toper` | 120 mm | 2.0 mm (1.6 + 0.4) | `down` (lustro) | nóżka 90 mm × 4.5 mm, czubek zwężony 4 mm, kreski pogrubione o 0.3 mm (`--thicken`) |
+| `brelok` | 40 mm | 3.0 mm (2.4 + 0.6) | `up` | ucho z otworem 4 mm u góry, obwódka 1.5 mm |
+| (brak) | 80 mm | 1.6 mm | `up` | — jak dotąd |
+
+Skąd toper: wydruki użytkownika z historii Bambu (3 toppery, 10.2026) — przodem do płyty, lustrzane, jeden kolor, jeden kawałek z jedną nóżką 4–4.5 mm × 73–99 mm (zmierzone z miniatur, 0.5 mm/px). Grubość ~1.9–2.2 mm to **szacunek z wagi**, nie pomiar — jeśli użytkownik poda prawdziwą, popraw `PRESETS`.
+
+- **Przód** `--face down`: przód leży na płycie (Textured PEI → równa, lekko błyszcząca faktura, ostre krawędzie kolorów), model odbity lustrzanie, kolory w pierwszych warstwach. `--face up`: kolory na wierzchu (tak drukowany był najlepszy wzorzec użytkownika — złote litery na białym krążku 100 mm).
+- **Efekt 3D** `--relief 0.8 [--dome]` (tylko `up`): kolory inne niż baza wystają o 0.8 mm; `--dome` zaokrągla ich krawędzie schodkami co 0.2 mm. Proponuj przy napisach i logo na tabliczkach/magnesach; nie przy toperach (przód na płycie jest płaski).
+- **Połysk**: najbardziej błyszczący wzorzec użytkownika zrobił filament **PLA Silk+** (Bambu GFA06), nie ustawienia — przy „ma błyszczeć" zaproponuj Silk na kolor wierzchni. `--iron` (prasowanie wierzchu) wygładza górę przy `up`; +~2 min na logo 30 mm (zmierzone), wzorce użytkownika były bez prasowania.
+- Toper z kilku kawałków (słowa, kropki, akcenty): `--check` proponuje `--bridge 1.2` — mostki do najbliższej litery, litery zostają cienkie. Nie `--outline` przy cienkich skryptach (zalewa litery, gubi ogonki ę/ą i kreski nad Ś). Build wypisuje `UWAGA`, gdy coś zostanie luzem.
+
+### Toper z samego tekstu (bez grafiki)
+
+Użytkownik podaje napis (np. od klienta) → nie każ mu niczego rysować:
+```bash
+$PY $SKILL_DIR/scripts/text2toper.py "Chrzest|Święty|Ola" --font AlexBrush --out ~/Documents/BambuPrint/<nazwa>/<nazwa>.svg
+$PY $SKILL_DIR/scripts/svg2bambu.py <svg> --typ toper --check        # zwykle zaleci --bridge 1.2
+$PY $SKILL_DIR/scripts/svg2bambu.py <svg> --typ toper --bridge 1.2 --open
+```
+`|` = nowa linia; linie wyśrodkowane, ciasno (`--spacing 0.72` × rozmiar fontu), żeby się zazębiały jak w toperach użytkownika. Fonty: `fonts/` w skillu (Alex Brush — ulubiony font użytkownika, OFL, polskie znaki OK), systemowe macOS albo ścieżka do .ttf. Nowy font od użytkownika → wrzuć do `fonts/` i sprawdź polskie znaki (ĄĆĘŁŃÓŚŹŻ). Przed budową pokaż PNG napisu (Read) — układ linii ocenia użytkownik.
+
 ## 4. Druk (klika użytkownik)
 
 `--open` otwiera plik w Bambu Studio. Powiedz użytkownikowi:
@@ -68,8 +95,19 @@ Nie startujesz druku sam. Bezpośrednia wysyłka (LAN + Developer Mode, FTPS 990
 ## Czas i koszt — z pomiarów (2026-10-10)
 
 - Czas zjadają zmiany koloru, nie rozmiar: logo 40/50/60 mm przy 0.8 mm kolorów = 24/25/26 min; przy 0.4 mm kolorów 50 mm = 17 min. Każda warstwa z kolorami to zmiany filamentu + czyszczenie dyszy.
-- Logo Wilsad 50×14 mm, 3 kolory, `--top 0.4`: 17 min, 3.45 g — wydrukowane, użytkownik zadowolony.
+- Logo 50×14 mm, 3 kolory, `--top 0.4`: 17 min, 3.45 g — wydrukowane, użytkownik zadowolony.
 - Biały na 2 warstwach może lekko prześwitywać kolorem bazy → `--top 0.6` jeśli to ważne.
+
+## Weryfikacja zmian w skrypcie
+
+Po zmianie `svg2bambu.py`: (1) bez nowych flag model ma być bajt w bajt jak wcześniej (`cmp` na `3D/3dmodel.model`); (2) mierz wynik z siatki 3MF, nie z wydruku skryptu (grubość, szer. nóżki w przekroju z=0, liczba kawałków, lustro przez IoU z wersją `up`); (3) zepsuj kod i sprawdź, że pomiar to wykrywa.
+
+## Historia druków użytkownika (wzorce)
+
+Konto Bambu = konto MakerWorld. Zalogowany Chrome (Claude in Chrome), karta na `makerworld.com`, fetch z `credentials:'include'`:
+- `/api/v1/user-service/my/tasks?limit=100` — historia (tytuł, gramy, czas, płyta, `amsDetailMapping`, `profileId`, `modelId`).
+- `/api/v1/iot-service/api/user/profile/{profileId}?model_id={modelId}` → `url` do `*_config.3mf` (ustawienia + miniatury + `plate_1.json` z obrysem obiektów, **bez siatki**); `context.plates[0].gcode.url` bywa pusty.
+- Pobieranie: `location.href = url` — Chrome puszcza 1 automatyczne pobranie na kartę, więc każdy plik w nowej karcie na makerworld.com. Pobrane wzorce: `~/Documents/BambuPrint/_wzorce/`.
 
 ## Problemy znane
 

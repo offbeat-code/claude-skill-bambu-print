@@ -43,9 +43,28 @@ Najważniejsze opcje `svg2bambu.py`: `--width` (mm), `--outline 3 --outline-colo
 (obwódka łącząca osobne kształty), `--top 0.6` (grubsza warstwa kolorów — lepsze krycie, dłuższy druk),
 `--max-colors`. Wyniki lądują w `~/Documents/BambuPrint/<nazwa>/`.
 
+### Typy i wykończenie
+
+- `--typ toper` — 120 mm, 2 mm, przodem do płyty (lustro), nóżka 90 × 4.5 mm ze zwężonym czubkiem, kreski +0.3 mm
+- `--typ brelok` — 40 mm, 3 mm, ucho z otworem 4 mm, obwódka 1.5 mm
+- `--face down` — przód na płycie (faktura płyty, ostre krawędzie kolorów); `--face up` — kolory na wierzchu
+- `--relief 0.8 --dome` — efekt 3D: kolory wystają i mają zaokrąglone krawędzie
+- `--bridge 1.2` — mostki do odłączonych kropek/akcentów/słów (toper w jednym kawałku, litery bez pogrubiania)
+- `--thicken 0.3` — pogrubienie kresek, `--iron` — prasowanie wierzchu
+
+### Toper z samego napisu
+
+```bash
+$PY $S/text2toper.py "Chrzest|Święty|Ola" --font AlexBrush --out ola/ola.svg   # | = nowa linia
+$PY $S/svg2bambu.py ola/ola.svg --typ toper --check                           # zwykle zaleci --bridge 1.2
+$PY $S/svg2bambu.py ola/ola.svg --typ toper --bridge 1.2 --open
+```
+
+Fonty: `fonts/` (Alex Brush, licencja OFL — `fonts/AlexBrush-OFL.txt`), fonty systemowe macOS albo ścieżka do .ttf.
+
 ## Jak to drukuje
 
-Baza 1.2 mm w kolorze o największej powierzchni pod całą sylwetką + 0.4 mm kolorów na wierzchu.
+Bez `--typ`: baza 1.2 mm w kolorze o największej powierzchni pod całą sylwetką + 0.4 mm kolorów na wierzchu.
 Zmiany filamentu są tylko w górnych warstwach, więc czas zależy głównie od liczby kolorów, nie od rozmiaru
 (logo 50 mm, 3 kolory ≈ 17 min, ≈ 3.5 g).
 
